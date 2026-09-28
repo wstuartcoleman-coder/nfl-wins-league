@@ -161,6 +161,34 @@
   .refresh-btn:hover { filter: brightness(1.15); }
   .refresh-btn:disabled { opacity: 0.6; cursor: default; }
 
+  .standings-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+
+  .share-btn {
+    font-family: 'Karla', sans-serif;
+    font-weight: 700;
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 8px 16px;
+    cursor: pointer;
+    flex: none;
+    margin-top: 2px;
+    white-space: nowrap;
+  }
+
+  .share-btn:hover { filter: brightness(1.15); }
+  .share-btn:disabled { opacity: 0.6; cursor: default; }
+
   nav.tabs {
     display: flex;
     gap: 4px;
@@ -205,7 +233,8 @@
 
   nav.tabs button:focus-visible,
   .standing-row:focus-visible,
-  .refresh-btn:focus-visible {
+  .refresh-btn:focus-visible,
+  .share-btn:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
@@ -524,8 +553,13 @@
 </nav>
 
 <section role="tabpanel" id="panel-standings" aria-labelledby="tab-standings">
-  <h2 class="section-title">League Standings</h2>
-  <p class="section-sub">Ranked by combined wins across each GM's three teams.</p>
+  <div class="standings-head">
+    <div>
+      <h2 class="section-title">League Standings</h2>
+      <p class="section-sub">Ranked by combined wins across each GM's three teams.</p>
+    </div>
+    <button id="share-standings-btn" class="share-btn" type="button">Share standings</button>
+  </div>
   <div class="standings-list" id="standings-list"></div>
 </section>
 
@@ -547,6 +581,7 @@
   Live records are pulled automatically from ESPN's public scoreboard feed and refresh every 5 minutes (or hit "Refresh now"). If a visitor's browser can't reach that feed, the page falls back to the last known snapshot instead of breaking.
 </footer>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script>
   // ---------- Fixed league data (the draft is final, this never changes) ----------
   const draftBoard = [
@@ -862,6 +897,79 @@
   }
 
   document.getElementById("refresh-btn").addEventListener("click", () => refreshLive(true));
+
+  // ---------- Share standings as an image ----------
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }
+
+  async function shareStandingsImage() {
+    const btn = document.getElementById("share-standings-btn");
+    if (btn.disabled) return;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Generating…";
+
+    const card = document.createElement("div");
+    card.style.cssText = `
+      position: fixed; left: -99999px; top: 0; width: 620px;
+      background: var(--bg); border: 1px solid var(--border); border-radius: 16px;
+      padding: 28px; font-family: 'Karla', sans-serif;
+    `;
+    card.innerHTML = `
+      <div style="display:flex; align-items:center; gap:10px; margin-bottom:4px;">
+        <svg viewBox="0 0 100 60" width="34" height="20" aria-hidden="true">
+          <ellipse cx="50" cy="30" rx="47" ry="25" fill="#EFAB44" />
+          <path d="M12 30 H88" stroke="#0A0C08" stroke-width="4" fill="none"/>
+          <path d="M36 22 V38 M50 20 V40 M64 22 V38" stroke="#0A0C08" stroke-width="4" fill="none" stroke-linecap="round"/>
+        </svg>
+        <span style="font-family:'Teko',sans-serif; font-size:30px; font-weight:700; color:var(--text);">NFL Wins League</span>
+      </div>
+      <div style="color:var(--text-muted); font-size:13px; margin-bottom:18px;">
+        Standings as of ${new Date().toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+      </div>
+    `;
+    const listClone = document.getElementById("standings-list").cloneNode(true);
+    card.appendChild(listClone);
+    document.body.appendChild(card);
+
+    try {
+      if (document.fonts && document.fonts.ready) await document.fonts.ready;
+      const canvas = await html2canvas(card, { backgroundColor: "#0A0C08", scale: 2, useCORS: true });
+      card.remove();
+
+      canvas.toBlob(async (blob) => {
+        if (!blob) { btn.disabled = false; btn.textContent = original; return; }
+        const file = new File([blob], "nfl-wins-league-standings.png", { type: "image/png" });
+        let shared = false;
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+          try {
+            await navigator.share({ files: [file], title: "NFL Wins League standings" });
+            shared = true;
+          } catch (e) {
+            // user backed out of the share sheet, or it's unsupported here — fall through to download
+          }
+        }
+        if (!shared) downloadBlob(blob, "nfl-wins-league-standings.png");
+        btn.disabled = false;
+        btn.textContent = original;
+      }, "image/png");
+    } catch (err) {
+      card.remove();
+      btn.disabled = false;
+      btn.textContent = original;
+      alert("Couldn't generate the image — try again in a second.");
+    }
+  }
+
+  document.getElementById("share-standings-btn").addEventListener("click", shareStandingsImage);
 
   // Paint instantly with the fallback so the page is never blank, then try live data.
   renderAll();
