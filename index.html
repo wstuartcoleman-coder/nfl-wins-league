@@ -832,7 +832,6 @@
   }
 
   // ---------- Live data ----------
-  const STANDINGS_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/standings";
   const SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard";
 
   function parseSummary(summary) {
@@ -840,56 +839,7 @@
     return { w: parts[0] || 0, l: parts[1] || 0, t: parts[2] || 0 };
   }
 
-  // The standings endpoint reports every team's season-to-date record in one
-  // shot, regardless of whether that team happens to be playing this week —
-  // so a team on a bye still shows up with its real record instead of being
-  // missing entirely (which is what the scoreboard endpoint does, and why a
-  // fresh page load during a bye week could show a team stuck at 0-0).
-  // Its exact nesting isn't something we can verify from a sandboxed test
-  // environment with blocked network access, so this walks the JSON
-  // defensively: recurse into any object/array looking for entries that have
-  // both a team name and a win/loss stat, and tolerate anything unexpected.
-  function extractTeamStatsRecursive(node, updates, depth) {
-    if (!node || typeof node !== "object" || depth > 12) return;
-    if (Array.isArray(node)) {
-      for (const item of node) extractTeamStatsRecursive(item, updates, depth + 1);
-      return;
-    }
-    const teamName = node.team && (node.team.name || node.team.displayName || node.team.shortDisplayName);
-    const stats = node.stats || (node.team && node.team.record && node.team.record.items);
-    if (teamName && Array.isArray(stats)) {
-      const findStat = (names) => stats.find(s => names.includes(s.name) || names.includes(s.type));
-      const wStat = findStat(["wins"]);
-      const lStat = findStat(["losses"]);
-      const tStat = findStat(["ties"]);
-      if (wStat && lStat) {
-        updates[teamName] = {
-          w: Math.round(Number(wStat.value)) || 0,
-          l: Math.round(Number(lStat.value)) || 0,
-          t: tStat ? (Math.round(Number(tStat.value)) || 0) : 0,
-        };
-      }
-    }
-    for (const key in node) {
-      if (key === "team") continue; // avoid re-descending into the team object itself
-      extractTeamStatsRecursive(node[key], updates, depth + 1);
-    }
-  }
-
-  async function fetchFromStandings() {
-    const res = await fetch(STANDINGS_URL, { cache: "no-store" });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const data = await res.json();
-    const updates = {};
-    extractTeamStatsRecursive(data, updates, 0);
-    if (Object.keys(updates).length < 16) throw new Error("standings response too sparse (" + Object.keys(updates).length + " teams)");
-    return updates;
-  }
-
-  async function fetchFromScoreboard() {
-    const res = await fetch(SCOREBOARD_URL, { cache: "no-store" });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const data = await res.json();
+  function extractRecordsFromScoreboardJson(data) {
     const updates = {};
     for (const event of (data.events || [])) {
       const comp = event.competitions && event.competitions[0];
@@ -902,16 +852,66 @@
         if (overall && overall.summary) updates[name] = parseSummary(overall.summary);
       }
     }
+    return updates;
+  }
+
+  async function fetchWeek(weekNum) {
+    const res = await fetch(`${SCOREBOARD_URL}?week=${weekNum}&seasontype=2`, { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return extractRecordsFromScoreboardJson(await res.json());
+  }
+
+  // Primary source: the scoreboard endpoint's per-game "overall" record is
+  // cumulative AS OF that game — not just that single game's result — so a
+  // team's record from the last week it actually played is still its
+  // correct current record, bye week or not (a bye doesn't change anyone's
+  // record; it just means that team has no entry in THIS week's response).
+  // So: find the current week, fetch every week from 1 through it, and for
+  // each team keep whichever week is the highest-numbered one it appears
+  // in. This only uses the scoreboard endpoint, which is confirmed to allow
+  // cross-origin requests from a plain static site (the per-team detail
+  // endpoint and the standings endpoint were both tried and ruled out —
+  // the former has no CORS headers at all, and the latter doesn't return
+  // per-team data over this public path).
+  async function fetchFromWeeklySchedule() {
+    const metaRes = await fetch(SCOREBOARD_URL, { cache: "no-store" });
+    if (!metaRes.ok) throw new Error("HTTP " + metaRes.status);
+    const meta = await metaRes.json();
+    const currentWeek = meta.week && meta.week.number;
+    if (!currentWeek) throw new Error("couldn't determine current week");
+
+    const weekNums = Array.from({ length: currentWeek }, (_, i) => i + 1);
+    const weekResults = await Promise.allSettled(weekNums.map(fetchWeek));
+
+    const updates = {};
+    weekNums.forEach((wk, i) => {
+      const r = weekResults[i];
+      if (r.status !== "fulfilled") return;
+      // Iterating weeks in order means a later (higher) week's record
+      // always overwrites an earlier one, which is what we want.
+      Object.assign(updates, r.value);
+    });
+
+    if (Object.keys(updates).length < 28) {
+      throw new Error("weekly schedule fetch too sparse (" + Object.keys(updates).length + "/32)");
+    }
+    return updates;
+  }
+
+  // Fallback source: just the current week's scoreboard. Cheaper than the
+  // full weekly replay above, but has the bye-week gap (a team not playing
+  // this week is simply absent) — only used if the full replay can't run.
+  async function fetchFromScoreboard() {
+    const res = await fetch(SCOREBOARD_URL, { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const updates = extractRecordsFromScoreboardJson(await res.json());
     if (Object.keys(updates).length === 0) throw new Error("empty scoreboard response");
     return updates;
   }
 
-  // Standings first — it's immune to the bye-week gap — and only fall back
-  // to the scoreboard (which only knows about teams playing that week) if
-  // standings can't be reached or parsed at all.
   async function fetchLiveRecords() {
     try {
-      return await fetchFromStandings();
+      return await fetchFromWeeklySchedule();
     } catch (err) {
       return await fetchFromScoreboard();
     }
