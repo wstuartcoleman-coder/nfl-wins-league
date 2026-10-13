@@ -578,7 +578,7 @@
 </section>
 
 <footer>
-  Live records are pulled automatically from ESPN's public scoreboard feed and refresh every 5 minutes (or hit "Refresh now"). If a visitor's browser can't reach that feed, the page falls back to the last known snapshot instead of breaking.
+  Live records are pulled automatically from ESPN's public scoreboard feed and refresh every 5 minutes (or hit "Refresh now"). A team on its bye week just keeps its last known record rather than resetting. If a visitor's browser can't reach the feed at all, the page falls back to the last successful update instead of breaking.
 </footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
@@ -617,7 +617,7 @@
     {pick:30, gm:"Ross", team:"Browns"},
   ];
 
-  // Last-known snapshot — only used if the live feed can't be reached.
+  // Last-known snapshot — only used before the very first live fetch ever succeeds.
   const FALLBACK_AS_OF = "Sept 12, 2026 (before Week 1's Sunday/Monday games)";
   const FALLBACK_RECORDS = {
     "Bills":       {w:0,l:0,t:0, conf:"AFC", div:"East"},
@@ -655,6 +655,7 @@
   };
 
   let currentRecords = FALLBACK_RECORDS;
+  let hasLiveData = false; // flips true after the first successful live fetch
   const recStr = (r) => r.t ? `${r.w}-${r.l}-${r.t}` : `${r.w}-${r.l}`;
   const draftedTeams = new Set(draftBoard.filter(p => p.team).map(p => p.team));
   const ownerOf = {};
@@ -880,16 +881,30 @@
     if (manual) setStatus("Refreshing…", null);
     try {
       const updates = await fetchLiveRecords();
+      // Merge onto the CURRENT records, not the original Week-1 snapshot — a
+      // team on a bye this week just isn't in `updates`, so it should keep
+      // its last known record instead of reverting all the way back.
       const merged = {};
       for (const [name, meta] of Object.entries(FALLBACK_RECORDS)) {
         const live = updates[name];
-        merged[name] = live ? { w: live.w, l: live.l, t: live.t, conf: meta.conf, div: meta.div } : { ...meta };
+        const prev = currentRecords[name] || meta;
+        merged[name] = live
+          ? { w: live.w, l: live.l, t: live.t, conf: meta.conf, div: meta.div }
+          : { w: prev.w, l: prev.l, t: prev.t, conf: meta.conf, div: meta.div };
       }
       currentRecords = merged;
+      hasLiveData = true;
       setStatus(`Live — updated ${formatNow()}`, "is-live");
     } catch (err) {
-      currentRecords = FALLBACK_RECORDS;
-      setStatus(`Live scores unavailable in this browser — showing the snapshot from ${FALLBACK_AS_OF}`, "is-stale");
+      if (!hasLiveData) {
+        // We've never once gotten live data this session — show the shipped snapshot.
+        currentRecords = FALLBACK_RECORDS;
+        setStatus(`Live scores unavailable in this browser — showing the snapshot from ${FALLBACK_AS_OF}`, "is-stale");
+      } else {
+        // A later refresh failed — keep showing whatever we last successfully fetched
+        // rather than throwing it away.
+        setStatus(`Live refresh failed just now — showing the last successful update`, "is-stale");
+      }
     }
     renderAll();
     btn.disabled = false;
